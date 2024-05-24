@@ -1,38 +1,3 @@
-"""
-<?xml version="1.0" encoding="utf-8"?>
-<!-- $Id: saldo.xml 167452 2017-07-04 00:36:44Z jonatan $ -->
-<LexicalResource dtdVersion="16">
-  <GlobalInformation>
-    <feat att="languageCoding" val="ISO 639-3" />
-  </GlobalInformation>
-  <Lexicon>
-    <feat att="language" val="swe" />
-    <LexicalEntry>
-      <Lemma />
-      <Sense id="PRIM..1" />
-    </LexicalEntry>
-    <LexicalEntry>
-      <Lemma>
-        <FormRepresentation>
-          <feat att="writtenForm" val="a-bomb" />
-          <feat att="partOfSpeech" val="nn" />
-          <feat att="lemgram" val="a-bomb..nn.1" />
-          <feat att="paradigm" val="nn_3u_salong" />
-        </FormRepresentation>
-        <FormRepresentation>
-          <feat att="writtenForm" val="A-bomb" />
-          <feat att="partOfSpeech" val="nn" />
-          <feat att="lemgram" val="A-bomb..nn.1" />
-          <feat att="paradigm" val="nn_3u_salong" />
-        </FormRepresentation>
-      </Lemma>
-      <Sense id="A-bomb..1">
-        <SenseRelation targets="atombomb..1">
-          <feat att="label" val="primary" />
-        </SenseRelation>
-      </Sense>
-    </LexicalEntry>
-"""
 import logging
 import uuid
 from typing import List, Optional
@@ -43,14 +8,6 @@ from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
-# class Feat(BaseModel):
-#     att: str
-#     val: str
-#
-#     @classmethod
-#     def from_soup(cls, soup):
-#         return cls(att=soup["att"], val=soup["val"])
 
 
 class FormRepresentation(BaseModel):
@@ -81,7 +38,7 @@ class Lemma(BaseModel):
         ]
         if not form_representations:
             logger.warning(f"no representations found for soup: {soup}")
-        return cls(FormRepresentation=form_representations)
+        return cls(form_representation=form_representations)
 
 
 class SenseRelation(BaseModel):
@@ -110,24 +67,33 @@ class Sense(BaseModel):
 
 
 class LexicalEntry(BaseModel):
-    lemma: Optional[Lemma] = None
+    lemma: Lemma
     sense: List[Sense]
     # Not all entries have a lemma with a lemgram so
     # lemgram is not a good unique identifier for lexical entries
-    # lemgram: str  # we want a validation error if no lemgram is found
+    lemgram: str  # we want a validation error if no lemgram is found
     entry_id: str
 
     @classmethod
     def from_soup(cls, soup):
         lemma = soup.find("Lemma")
-        # lemgram = soup.find('Lemma').find('feat', {'att': 'lemgram'})['val']
-        senses = [Sense.from_soup(sense) for sense in soup.find_all("Sense")]
-        return cls(
-            lemma=Lemma.from_soup(lemma) if lemma else None,
-            sense=senses,
-            # lemgram=lemgram,
-            entry_id=str(uuid.uuid4())[:6],  # Generate unique ID
-        )
+        if not lemma:
+            logger.warning(f"no lemma found in soup: {soup}")
+        else:
+            lemgram_node = soup.find('Lemma').find('feat', {'att': 'lemgram'})
+            if lemgram_node is None:
+                # This seems to be some kind of root node for the senses with no content.
+                logger.warning(f"no lemgram node found in soup: {soup}. Ignoring the entry")
+                return None
+            else:
+                lemgram = lemgram_node['val']
+                senses = [Sense.from_soup(sense) for sense in soup.find_all("Sense")]
+                return cls(
+                    lemma=Lemma.from_soup(lemma) if lemma else None,
+                    sense=senses,
+                    lemgram=lemgram,
+                    entry_id=str(uuid.uuid4())[:6],  # Generate unique ID
+                )
 
 
 class Lexicon(BaseModel):
@@ -140,6 +106,8 @@ class Lexicon(BaseModel):
         lexical_entries = [
             LexicalEntry.from_soup(le) for le in soup.find_all("LexicalEntry")
         ]
+        # remove None from the list
+        lexical_entries = [l for l in lexical_entries if l is not None]
         return cls(language=language, lexical_entries=lexical_entries)
 
 
