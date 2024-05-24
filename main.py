@@ -2,9 +2,12 @@ import logging
 import uuid
 from typing import List
 
+import aiohttp
+import asyncio
 import jsonlines
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
+from tqdm.asyncio import tqdm_asyncio
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -119,6 +122,7 @@ class SenseRelation(BaseModel):
 class Sense(BaseModel):
     id: str
     sense_relations: List[SenseRelation] = []
+    sense_url_found: bool = False
 
     @classmethod
     def from_soup(cls, soup):
@@ -127,6 +131,20 @@ class Sense(BaseModel):
         ]
         return cls(id=soup["id"], sense_relations=sense_relations)
 
+    @property
+    def url(self):
+        return f"https://spraakbanken.gu.se/ws/saldo-ws/lid/html/{self.id}"
+
+    async def check_sense_url(self, session):
+        """Check if the senseexists at the URL."""
+        if self.url:
+            async with session.head(self.url) as response:
+                if response.status in [200, 405]:
+                    self.sense_url_found = True
+                elif response.status in [404]:
+                    self.sense_url_found = False
+                else:
+                    raise Exception(f"Unexpected response code: {response.status} for URL: {self.url}")
 
 
 class LexicalEntry(BaseModel):
@@ -227,9 +245,13 @@ class LexicalResource(BaseModel):
         ]
         return len(lexical_entry_ids) == len(set(lexical_entry_ids))
 
-    def output_to_jsonl(self, file_path: str = "data/lexsaldo_v1.jsonl"):
+    def verify_lookup_and_output(self):
         if not self.verify_unique:
             raise ValueError("the generated ids of lexical_entries are not unique")
+        asyncio.run(self.update_sense_url_status())
+        self.output_to_jsonl()
+
+    def output_to_jsonl(self, file_path: str = "data/lexsaldo_v1.jsonl"):
         with jsonlines.open(file_path, mode="w") as writer:
             for entry in self.lexicon.lexical_entries:
                 writer.write(entry.model_dump())
@@ -269,10 +291,18 @@ class LexicalResource(BaseModel):
 
         return round(total_sense_relations / total_senses, 1)
 
+    async def update_sense_url_status(self):
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for entry in self.lexicon.lexical_entries:
+                for sense in entry.senses:
+                    tasks.append(sense.check_sense_url(session))
+            await tqdm_asyncio.gather(*tasks)
+
 
 file_path = "data/saldo.xml"  # replace with your actual file path
 lexical_resource = LexicalResource.from_file(file_path)
-lexical_resource.output_to_jsonl()
+lexical_resource.verify_lookup_and_output()
 print("Total lexical entries:", lexical_resource.count_lexical_entries())
 print("lexical entries with at least one sense:", lexical_resource.count_senses())
 print("Total unique senses:", lexical_resource.count_unique_senses())
