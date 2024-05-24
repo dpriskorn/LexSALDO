@@ -42,9 +42,14 @@ class Feat(BaseModel):
     att: str
     val: str
 
-    @classmethod
-    def from_soup(cls, soup):
-        return cls(att=soup['att'], val=soup['val'])
+# class Feat(BaseModel):
+#     att: str
+#     val: str
+#
+#     @classmethod
+#     def from_soup(cls, soup):
+#         return cls(att=soup["att"], val=soup["val"])
+
 
 class FormRepresentation(BaseModel):
     writtenForm: str
