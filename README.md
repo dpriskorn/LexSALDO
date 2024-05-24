@@ -1,9 +1,10 @@
 # LexSALDO
 This is a project to analyze and add identifiers for words 
 from SALDO to Wikidata.
+A unique UUID-based identifier have been added to lexical entries to facilitate linking with Wikidata.
 
 ## TODO
-* investigate if a unique identifier is present for both entries and senses.
+* investigate if a unique identifier is present for senses.
 
 ## API
 An API has been added for easy lookup. The goal is to upload it to Toolforge to facilitate
