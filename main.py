@@ -33,14 +33,16 @@
       </Sense>
     </LexicalEntry>
 """
-
+import logging
+import uuid
 from typing import List, Optional
+
+import jsonlines
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 
-class Feat(BaseModel):
-    att: str
-    val: str
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # class Feat(BaseModel):
 #     att: str
@@ -59,21 +61,28 @@ class FormRepresentation(BaseModel):
 
     @classmethod
     def from_soup(cls, soup):
-        feats = {feat['att']: feat['val'] for feat in soup.find_all('feat')}
+        feats = {feat["att"]: feat["val"] for feat in soup.find_all("feat")}
         return cls(
-            writtenForm=feats['writtenForm'],
-            partOfSpeech=feats['partOfSpeech'],
-            lemgram=feats['lemgram'],
-            paradigm=feats['paradigm']
+            writtenForm=feats["writtenForm"],
+            partOfSpeech=feats["partOfSpeech"],
+            lemgram=feats["lemgram"],
+            paradigm=feats["paradigm"],
         )
 
+
 class Lemma(BaseModel):
-    FormRepresentation: List[FormRepresentation]
+    form_representation: List[FormRepresentation] = []
 
     @classmethod
     def from_soup(cls, soup):
-        form_representations = [FormRepresentation.from_soup(fr) for fr in soup.find_all('FormRepresentation')]
+        form_representations = [
+            FormRepresentation.from_soup(fr)
+            for fr in soup.find_all("FormRepresentation")
+        ]
+        if not form_representations:
+            logger.warning(f"no representations found for soup: {soup}")
         return cls(FormRepresentation=form_representations)
+
 
 class SenseRelation(BaseModel):
     targets: str
@@ -81,67 +90,84 @@ class SenseRelation(BaseModel):
 
     @classmethod
     def from_soup(cls, soup):
-        feats = {feat['att']: feat['val'] for feat in soup.find_all('feat')}
-        return cls(
-            targets=soup['targets'],
-            label=feats['label']
-        )
+        feats = {feat["att"]: feat["val"] for feat in soup.find_all("feat")}
+        return cls(targets=soup["targets"], label=feats["label"])
+
 
 class Sense(BaseModel):
     id: str
-    SenseRelation: Optional[SenseRelation] = None
+    sense_relation: Optional[SenseRelation] = None
 
     @classmethod
     def from_soup(cls, soup):
-        sense_relation = soup.find('SenseRelation')
+        sense_relation = soup.find("SenseRelation")
         return cls(
-            id=soup['id'],
-            SenseRelation=SenseRelation.from_soup(sense_relation) if sense_relation else None
+            id=soup["id"],
+            sense_relation=SenseRelation.from_soup(sense_relation)
+            if sense_relation
+            else None,
         )
+
 
 class LexicalEntry(BaseModel):
-    Lemma: Optional[Lemma] = None
-    Sense: List[Sense]
+    lemma: Optional[Lemma] = None
+    sense: List[Sense]
+    # Not all entries have a lemma with a lemgram so
+    # lemgram is not a good unique identifier for lexical entries
+    # lemgram: str  # we want a validation error if no lemgram is found
+    entry_id: str
 
     @classmethod
     def from_soup(cls, soup):
-        lemma = soup.find('Lemma')
-        senses = [Sense.from_soup(sense) for sense in soup.find_all('Sense')]
+        lemma = soup.find("Lemma")
+        # lemgram = soup.find('Lemma').find('feat', {'att': 'lemgram'})['val']
+        senses = [Sense.from_soup(sense) for sense in soup.find_all("Sense")]
         return cls(
-            Lemma=Lemma.from_soup(lemma) if lemma else None,
-            Sense=senses
+            lemma=Lemma.from_soup(lemma) if lemma else None,
+            sense=senses,
+            # lemgram=lemgram,
+            entry_id=str(uuid.uuid4())[:6],  # Generate unique ID
         )
+
 
 class Lexicon(BaseModel):
     language: str
-    LexicalEntry: List[LexicalEntry]
+    lexical_entries: List[LexicalEntry]
 
     @classmethod
     def from_soup(cls, soup):
-        language = soup.find('feat', {'att': 'language'})['val']
-        lexical_entries = [LexicalEntry.from_soup(le) for le in soup.find_all('LexicalEntry')]
-        return cls(language=language, LexicalEntry=lexical_entries)
+        language = soup.find("feat", {"att": "language"})["val"]
+        lexical_entries = [
+            LexicalEntry.from_soup(le) for le in soup.find_all("LexicalEntry")
+        ]
+        return cls(language=language, lexical_entries=lexical_entries)
+
 
 class GlobalInformation(BaseModel):
     languageCoding: str
 
     @classmethod
     def from_soup(cls, soup):
-        language_coding = soup.find('feat', {'att': 'languageCoding'})['val']
+        language_coding = soup.find("feat", {"att": "languageCoding"})["val"]
         return cls(languageCoding=language_coding)
+
 
 class LexicalResource(BaseModel):
     dtdVersion: str
     GlobalInformation: GlobalInformation
-    Lexicon: Lexicon
+    lexicon: Lexicon
 
     @classmethod
     def from_xml(cls, xml_content):
         soup = BeautifulSoup(xml_content, "xml")
-        dtd_version = soup.find('LexicalResource')['dtdVersion']
-        global_information = GlobalInformation.from_soup(soup.find('GlobalInformation'))
-        lexicon = Lexicon.from_soup(soup.find('Lexicon'))
-        return cls(dtdVersion=dtd_version, GlobalInformation=global_information, Lexicon=lexicon)
+        dtd_version = soup.find("LexicalResource")["dtdVersion"]
+        global_information = GlobalInformation.from_soup(soup.find("GlobalInformation"))
+        lexicon = Lexicon.from_soup(soup.find("Lexicon"))
+        return cls(
+            dtdVersion=dtd_version,
+            GlobalInformation=global_information,
+            lexicon=lexicon,
+        )
 
     @classmethod
     def from_file(cls, file_path):
@@ -149,13 +175,25 @@ class LexicalResource(BaseModel):
             xml_content = file.read()
         return cls.from_xml(xml_content)
 
-    def output_to_jsonl(self, file_path: str = "data/folkets_lexicon_v2.jsonl"):
+    @property
+    def verify_unique(self):
+        """Count number of lexical_entries and add all ids to a set.
+        Then verify that the set and count is the same"""
+        lexical_entry_ids = [
+            sense.id for entry in self.lexicon.lexical_entries for sense in entry.sense
+        ]
+        return len(lexical_entry_ids) == len(set(lexical_entry_ids))
+
+    def output_to_jsonl(self, file_path: str = "data/lexsaldo_v1.jsonl"):
+        if not self.verify_unique:
+            raise ValueError("the generated ids of lexical_entries are not unique")
         with jsonlines.open(file_path, mode="w") as writer:
-            for word in self.words:
-                writer.write(word.get_output_dict)
+            for entry in self.lexicon.lexical_entries:
+                writer.write(entry.model_dump())
 
 
 # Example usage:
-file_path = 'data/saldo.xml'  # replace with your actual file path
+file_path = "data/saldo.xml"  # replace with your actual file path
 lexical_resource = LexicalResource.from_file(file_path)
-print(lexical_resource.json(indent=2))
+lexical_resource.output_to_jsonl()
+# print(lexical_resource.json(indent=2))
