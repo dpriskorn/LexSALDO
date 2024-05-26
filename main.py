@@ -1,197 +1,20 @@
 import csv
 import logging
-import uuid
 from pathlib import Path
 from typing import List
 
-import aiohttp
-import asyncio
 import jsonlines
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
-from tqdm.asyncio import tqdm_asyncio
+
+from models.lexical_entry import LexicalEntry
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 version = "v1"
-lookup_url = False
-
-"""
-Sources:
-https://spraakbanken.gu.se/parole/Docs/SUC2.0-manual.pdf
-https://www.diva-portal.org/smash/get/diva2:656074/FULLTEXT01.pdf
-https://fileadmin.cs.lth.se/cs/Education/EDA171/Reports/2007/peter.pdf
-"""
-pos_mapping = {
-    "abbrev": "Q102786",  # abbreviation
-    "jj": "Q34698",  # adjective # see https://fileadmin.cs.lth.se/cs/Personal/Pierre_Nugues/ilppp/slides/ch07.pdf
-    "rg": "Q163875",  # cardinal number
-    "prefix": "Q134830",  # prefix
-    "article": "Q103184",  # article
-    "suffix": "Q102047",  # suffix
-    "hp": "Q1050744",  # relative pronoun
-    "ps": "Q1502460",  # possessive pronoun
-    "nn": "Q1084",  # noun
-    "av": "Q34698",  # adjective
-    "vb": "Q24905",  # verb
-    "pm": "Q147276",  # proper noun
-    "ab": "Q192420",  # adverb
-    "in": "Q198061",  # interjection
-    "pp": "Q168713",  # preposition
-    "nl": "Q13164",  # numeral
-    "pn": "Q149667",  # pronoun
-    "sn": "Q107715",  # subjunction
-    "kn": "Q11376",  # conjunction
-    "al": "Q7247",  # article
-    "ie": "Q213443",  # infinitive particle
-    "mxc": "Q4115189",  # multiword prefix
-    "sxc": "Q59019669",  # prefix
-    "abh": "Q15563735",  # adverb suffix
-    "avh": "Q5307395",  # adjective suffix
-    "nnh": "Q4961746",  # noun suffix
-    "nnm": "Q724908",  # multiword noun
-    "nna": "Q1077132",  # noun, abbreviation
-    "avm": "Q729",  # multiword adjective
-    "ava": "Q25132092",  # adjective, abbreviation
-    "vbm": "Q181714",  # multiword verb
-    "vba": "Q4231319",  # verb, abbreviation
-    "pmm": "Q188627",  # multiword proper noun
-    "pma": "Q24888353",  # proper noun, abbreviation
-    "abm": "Q6734441",  # multiword adverb
-    "aba": "Q40482579",  # adverb, abbreviation
-    "pnm": "Q10828648",  # multiword pronoun
-    "inm": "Q69556741",  # multiword interjection
-    "ppm": "Q30840955",  # multiword preposition
-    "ppa": "Q32736580",  # preposition, abbreviation
-    "nlm": "Q22069880",  # multiword numeral
-    "knm": "Q69559303",  # multiword conjunction
-    "snm": "Q69559308",  # multiword subjunction
-    "kna": "Q69559304",  # conjunction, abbreviation
-    "ssm": "Q69559307",  # multiword, clause
-}
-
-def get_lexical_category(pos: str) -> str:
-    if pos in pos_mapping:
-        return pos_mapping[pos]
-    elif not pos:
-        # we ignore this for now
-        return ""
-    else:
-        raise ValueError(
-            "No matching QID found for word class: {}".format(pos)
-        )
-
-
-class FormRepresentation(BaseModel):
-    writtenForm: str
-    partOfSpeech: str
-    lemgram: str
-    paradigm: str
-
-    @classmethod
-    def from_soup(cls, soup):
-        feats = {feat["att"]: feat["val"] for feat in soup.find_all("feat")}
-        return cls(
-            writtenForm=feats["writtenForm"],
-            partOfSpeech=feats["partOfSpeech"],
-            lemgram=feats["lemgram"],
-            paradigm=feats["paradigm"],
-        )
-
-
-class Lemma(BaseModel):
-    form_representations: List[FormRepresentation] = []
-
-    @classmethod
-    def from_soup(cls, soup):
-        form_representations = [
-            FormRepresentation.from_soup(fr)
-            for fr in soup.find_all("FormRepresentation")
-        ]
-        if not form_representations:
-            logger.warning(f"no representations found for soup: {soup}")
-        return cls(form_representations=form_representations)
-
-
-class SenseRelation(BaseModel):
-    targets: str
-    label: str
-
-    @classmethod
-    def from_soup(cls, soup):
-        feats = {feat["att"]: feat["val"] for feat in soup.find_all("feat")}
-        return cls(targets=soup["targets"], label=feats["label"])
-
-
-class Sense(BaseModel):
-    id: str
-    sense_relations: List[SenseRelation] = []
-    sense_url_found: bool = False
-
-    @classmethod
-    def from_soup(cls, soup):
-        sense_relations = [
-            SenseRelation.from_soup(sr) for sr in soup.find_all("SenseRelation")
-        ]
-        return cls(id=soup["id"], sense_relations=sense_relations)
-
-    @property
-    def url(self):
-        return f"https://spraakbanken.gu.se/ws/saldo-ws/lid/html/{self.id}"
-
-    async def check_sense_url(self, session):
-        """Check if the senseexists at the URL."""
-        if self.url:
-            async with session.head(self.url) as response:
-                if response.status in [200, 405]:
-                    self.sense_url_found = True
-                elif response.status in [404]:
-                    self.sense_url_found = False
-                else:
-                    raise Exception(f"Unexpected response code: {response.status} for URL: {self.url}")
-
-
-class LexicalEntry(BaseModel):
-    lemma: Lemma
-    senses: List[Sense]
-    lemgram: str  # we want a validation error if no lemgram is found
-    entry_id: str
-    part_of_speech: str # we want a validation error if no part_of_speech is found
-    wd_lexical_category: str
-
-    @classmethod
-    def from_soup(cls, soup):
-        lemma = soup.find("Lemma")
-        if not lemma:
-            logger.warning(f"no lemma found in soup: {soup}")
-        else:
-            lemgram_node = soup.find("Lemma").find("feat", {"att": "lemgram"})
-            if lemgram_node is None:
-                # This seems to be some kind of root node
-                # for the senses with no content.
-                logger.warning(
-                    f"no lemgram node found in soup: {soup}. Ignoring the entry"
-                )
-                return None
-            part_of_speech_node = soup.find("Lemma").find("feat", {"att": "partOfSpeech"})
-            if part_of_speech_node is None:
-                logger.warning(
-                    f"no lemgram node found in soup: {soup}."
-                )
-                return None
-            else:
-                lemgram = lemgram_node["val"]
-                part_of_speech = part_of_speech_node["val"]
-                senses = [Sense.from_soup(sense) for sense in soup.find_all("Sense")]
-                return cls(
-                    lemma=Lemma.from_soup(lemma) if lemma else None,
-                    senses=senses,
-                    lemgram=lemgram,
-                    entry_id=str(uuid.uuid4())[:6],  # Generate unique ID
-                    part_of_speech=part_of_speech,
-                    wd_lexical_category=get_lexical_category(pos=part_of_speech)
-                )
+# DISABLED lookup because we got errors and timeouts
+# lookup_url = False
 
 
 class Lexicon(BaseModel):
@@ -253,8 +76,8 @@ class LexicalResource(BaseModel):
     def verify_lookup_and_output(self):
         if not self.verify_unique:
             raise ValueError("the generated ids of lexical_entries are not unique")
-        if lookup_url:
-            asyncio.run(self.update_sense_url_status())
+        # if lookup_url:
+        #     asyncio.run(self.update_sense_url_status())
         self.save_outputs_to_disk()
 
     def save_outputs_to_disk(self):
@@ -280,14 +103,14 @@ class LexicalResource(BaseModel):
                 for form_rep in entry.lemma.form_representations:
                     form_representation_data.append([
                         form_rep.writtenForm,
-                        form_rep.partOfSpeech,
+                        entry.wd_lexical_category,
                         form_rep.lemgram
                     ])
 
         form_representation_csv_path = data_dir / f"form_representation_{version}.csv"
         with form_representation_csv_path.open(mode="w", newline='', encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["writtenForm", "part_of_speech", "lemgram"])
+            writer.writerow(["writtenForm", "lexical_category", "lemgram"])
             writer.writerows(form_representation_data)
 
         # Prepare data for the second CSV file
@@ -299,13 +122,14 @@ class LexicalResource(BaseModel):
                     for written_form in written_forms:
                         lemma_sense_data.append([
                             written_form,
-                            sense.id
+                            entry.wd_lexical_category,
+                            sense.id,
                         ])
 
-        lemma_sense_csv_path = data_dir / f"lemma_sense_{version}.csv"
+        lemma_sense_csv_path = data_dir / f"senses_{version}.csv"
         with lemma_sense_csv_path.open(mode="w", newline='', encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["writtenForm", "sense_id"])
+            writer.writerow(["writtenForm", "lexical_category", "sense_id"])
             writer.writerows(lemma_sense_data)
 
     def count_lexical_entries(self):
@@ -343,17 +167,19 @@ class LexicalResource(BaseModel):
 
         return round(total_sense_relations / total_senses, 1)
 
-    async def update_sense_url_status(self):
-        print("Looking up senses on https://spraakbanken.gu.se/ws/saldo-ws/lid/html/")
-        # We limit number of parallel connections because we get a ServerDisconnectedError
-        connector = aiohttp.TCPConnector(limit=25)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = []
-            for entry in self.lexicon.lexical_entries:
-                for sense in entry.senses:
-                    tasks.append(sense.check_sense_url(session))
-            await tqdm_asyncio.gather(*tasks)
-
+    # async def update_sense_url_status(self):
+    #     print("Looking up senses on https://spraakbanken.gu.se/ws/saldo-ws/lid/html/")
+    #     # We limit number of parallel connections because we get a ServerDisconnectedError
+    #     connector = aiohttp.TCPConnector(limit=150, force_close=True)
+    #     async with aiohttp.ClientSession(connector=connector) as session:
+    #         tasks = []
+    #         for entry in self.lexicon.lexical_entries:
+    #             for sense in entry.senses:
+    #                 tasks.append(sense.check_sense_url(session))
+    #         try:
+    #             await tqdm_asyncio.gather(*tasks)
+    #         except (TimeoutError, ClientConnectorError):
+    #             print("Got an error, skipping lookup")
 
 file_path = "data/saldo.xml"  # replace with your actual file path
 lexical_resource = LexicalResource.from_file(file_path)
