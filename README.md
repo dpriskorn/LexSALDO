@@ -1,5 +1,6 @@
 # LexSALDO
 This is a project to analyze and match wikidata lexical categories for lexemes and senses in SALDO version 2017-09-19.
+
 A unique UUID-based identifier have been added to lexical entries to facilitate linking with Wikidata 
 if the community for some reason do not want to use the existing one.
 
