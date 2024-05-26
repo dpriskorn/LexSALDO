@@ -1,5 +1,7 @@
+import csv
 import logging
 import uuid
+from pathlib import Path
 from typing import List
 
 import aiohttp
@@ -11,6 +13,9 @@ from tqdm.asyncio import tqdm_asyncio
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+version = "v1"
+lookup_url = False
 
 """
 Sources:
@@ -96,7 +101,7 @@ class FormRepresentation(BaseModel):
 
 
 class Lemma(BaseModel):
-    form_representation: List[FormRepresentation] = []
+    form_representations: List[FormRepresentation] = []
 
     @classmethod
     def from_soup(cls, soup):
@@ -106,7 +111,7 @@ class Lemma(BaseModel):
         ]
         if not form_representations:
             logger.warning(f"no representations found for soup: {soup}")
-        return cls(form_representation=form_representations)
+        return cls(form_representations=form_representations)
 
 
 class SenseRelation(BaseModel):
@@ -248,13 +253,60 @@ class LexicalResource(BaseModel):
     def verify_lookup_and_output(self):
         if not self.verify_unique:
             raise ValueError("the generated ids of lexical_entries are not unique")
-        asyncio.run(self.update_sense_url_status())
-        self.output_to_jsonl()
+        if lookup_url:
+            asyncio.run(self.update_sense_url_status())
+        self.save_outputs_to_disk()
 
-    def output_to_jsonl(self, file_path: str = "data/lexsaldo_v1.jsonl"):
+    def save_outputs_to_disk(self):
+        self.output_to_jsonl()
+        self.output_to_csv()
+
+    def output_to_jsonl(self, file_path: str = f"data/lexsaldo_{version}.jsonl"):
         with jsonlines.open(file_path, mode="w") as writer:
             for entry in self.lexicon.lexical_entries:
                 writer.write(entry.model_dump())
+
+    def output_to_csv(self, version: str = version):
+        """This outputs 2 csv files for mishramilan, see https://mishramilan.toolforge.org/
+        1) one with columns writtenForm, part_of_speech, lemgram for each form_representation
+        2) one with columns writtenForm, sense_id for each lemma"""
+        data_dir = Path("data")
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Prepare data for the first CSV file
+        form_representation_data = []
+        for entry in self.lexicon.lexical_entries:
+            if entry.lemma:
+                for form_rep in entry.lemma.form_representations:
+                    form_representation_data.append([
+                        form_rep.writtenForm,
+                        form_rep.partOfSpeech,
+                        form_rep.lemgram
+                    ])
+
+        form_representation_csv_path = data_dir / f"form_representation_{version}.csv"
+        with form_representation_csv_path.open(mode="w", newline='', encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["writtenForm", "part_of_speech", "lemgram"])
+            writer.writerows(form_representation_data)
+
+        # Prepare data for the second CSV file
+        lemma_sense_data = []
+        for entry in self.lexicon.lexical_entries:
+            if entry.lemma:
+                written_forms = [form_rep.writtenForm for form_rep in entry.lemma.form_representations]
+                for sense in entry.senses:
+                    for written_form in written_forms:
+                        lemma_sense_data.append([
+                            written_form,
+                            sense.id
+                        ])
+
+        lemma_sense_csv_path = data_dir / f"lemma_sense_{version}.csv"
+        with lemma_sense_csv_path.open(mode="w", newline='', encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["writtenForm", "sense_id"])
+            writer.writerows(lemma_sense_data)
 
     def count_lexical_entries(self):
         """Count the number of lexical entries."""
@@ -292,7 +344,10 @@ class LexicalResource(BaseModel):
         return round(total_sense_relations / total_senses, 1)
 
     async def update_sense_url_status(self):
-        async with aiohttp.ClientSession() as session:
+        print("Looking up senses on https://spraakbanken.gu.se/ws/saldo-ws/lid/html/")
+        # We limit number of parallel connections because we get a ServerDisconnectedError
+        connector = aiohttp.TCPConnector(limit=25)
+        async with aiohttp.ClientSession(connector=connector) as session:
             tasks = []
             for entry in self.lexicon.lexical_entries:
                 for sense in entry.senses:
